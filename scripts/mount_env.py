@@ -24,6 +24,8 @@ import webbrowser
 import urllib.parse
 import urllib.request
 import ssl
+import hashlib
+import getpass
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 SSL_CTX = ssl.create_default_context()
@@ -113,7 +115,7 @@ def inline_resources(dom, base_url, assets_dir=None):
         content = _get_content(href)
         if content:
             css_text = content.decode('utf-8', errors='replace')
-            css_text = css_text.replace('</style>', r'<\/style>')
+            css_text = re.sub(r'<(/style)', r'\\3C\1', css_text, flags=re.IGNORECASE)
             inlined_count += 1
             return f'<style data-inlined-from="{href}">\n{css_text}\n</style>'
         return tag
@@ -134,11 +136,12 @@ def inline_resources(dom, base_url, assets_dir=None):
         content = _get_content(src)
         if content:
             js_text = content.decode('utf-8', errors='replace')
-            js_text = js_text.replace('</script>', r'<\/script>')
+            # 内联的 JS 中可能包含 HTML 标签字符串（模板字符串、字符串拼接等）
+            # HTML parser 会把 <tag、</tag、<!-- 当成真实标签，破坏页面结构
+            # 用 \u003c 替换，JS 引擎能正确识别
+            js_text = re.sub(r'<(/?[a-zA-Z!])', lambda m: '\\u003c' + m.group(1), js_text)
             inlined_count += 1
-            # 移除 src 属性，保留其他属性
-            new_tag = re.sub(r'\s*src=["\'][^"\']+["\']', '', tag_open)
-            return f'{new_tag}\n{js_text}\n</script>'
+            return f'<script data-inlined-from="{src}">\n{js_text}\n</script>'
         return match.group(0)
 
     dom = re.sub(r'(<script[^>]+src=["\'][^"\']+["\'][^>]*>)\s*</script>', replace_js, dom)
@@ -197,6 +200,11 @@ def clean_dom(dom):
 # ================================================================
 # 3. 还原脚本（Storage / Globals / Network Replay / 表单 / 滚动）
 # ================================================================
+def _safe_json_for_html(obj):
+    """JSON 序列化后转义所有 <，防止 HTML parser 解析 JSON 中的标签。"""
+    return json.dumps(obj, ensure_ascii=False).replace('<', '\\u003c')
+
+
 def build_restore_script(data):
     """构建注入页面的还原脚本。"""
     storage = data.get('storage', {})
@@ -211,40 +219,40 @@ def build_restore_script(data):
 (function() {{
   // --- Storage ---
   try {{
-    var ls = {json.dumps(storage.get('localStorage', {}))};
+    var ls = {_safe_json_for_html(storage.get('localStorage', {}))};
     for (var k in ls) localStorage.setItem(k, ls[k]);
   }} catch(e) {{}}
   try {{
-    var ss = {json.dumps(storage.get('sessionStorage', {}))};
+    var ss = {_safe_json_for_html(storage.get('sessionStorage', {}))};
     for (var k in ss) sessionStorage.setItem(k, ss[k]);
   }} catch(e) {{}}
 
   // --- Globals ---
   try {{
-    var _is = {json.dumps(runtime.get('initialState'))};
+    var _is = {_safe_json_for_html(runtime.get('initialState'))};
     if (_is !== null) window.__INITIAL_STATE__ = _is;
-    var _as = {json.dumps(runtime.get('appState'))};
+    var _as = {_safe_json_for_html(runtime.get('appState'))};
     if (_as !== null) window.__APP_STATE__ = _as;
-    var _nd = {json.dumps(runtime.get('nuxtData'))};
+    var _nd = {_safe_json_for_html(runtime.get('nuxtData'))};
     if (_nd !== null) window.__NUXT__ = _nd;
-    var _nxd = {json.dumps(runtime.get('nextData'))};
+    var _nxd = {_safe_json_for_html(runtime.get('nextData'))};
     if (_nxd !== null) window.__NEXT_DATA__ = _nxd;
   }} catch(e) {{}}
 
   // --- history.state ---
   try {{
-    var hs = {json.dumps(runtime.get('historyState'))};
+    var hs = {_safe_json_for_html(runtime.get('historyState'))};
     if (hs !== null) history.replaceState(hs, '');
   }} catch(e) {{}}
 
   // --- CSS Variables ---
   try {{
-    var cv = {json.dumps(css_vars)};
+    var cv = {_safe_json_for_html(css_vars)};
     for (var k in cv) document.documentElement.style.setProperty(k, cv[k]);
   }} catch(e) {{}}
 
   // --- Network Replay ---
-  var _entries = {json.dumps(network_replay)};
+  var _entries = {_safe_json_for_html(network_replay)};
   var _map = {{}};
   _entries.forEach(function(e) {{
     if (!e.url || e.error) return;
@@ -308,7 +316,7 @@ def build_restore_script(data):
   }};
 
   // --- IndexedDB ---
-  var _idb = {json.dumps(idb_data)};
+  var _idb = {_safe_json_for_html(idb_data)};
   if (Object.keys(_idb).length > 0) {{
     (async function() {{
       for (var dn in _idb) {{
@@ -349,7 +357,7 @@ def build_restore_script(data):
 
   // --- Post-load: form, scroll, focus ---
   window.addEventListener('DOMContentLoaded', function() {{
-    var fd = {json.dumps(form_state)};
+    var fd = {_safe_json_for_html(form_state)};
     fd.forEach(function(item) {{
       var el = null;
       if (item.selector) try {{ el = document.querySelector(item.selector); }} catch(e) {{}}
@@ -361,9 +369,9 @@ def build_restore_script(data):
       el.dispatchEvent(new Event('input', {{ bubbles: true }}));
       el.dispatchEvent(new Event('change', {{ bubbles: true }}));
     }});
-    var sc = {json.dumps(interaction.get('scroll', {'x': 0, 'y': 0}))};
+    var sc = {_safe_json_for_html(interaction.get('scroll', {'x': 0, 'y': 0}))};
     window.scrollTo(sc.x, sc.y);
-    var fs = {json.dumps(interaction.get('focus'))};
+    var fs = {_safe_json_for_html(interaction.get('focus'))};
     if (fs) try {{ var e = document.querySelector(fs); if (e) e.focus(); }} catch(e) {{}}
   }});
 }})();
@@ -375,7 +383,8 @@ def build_restore_script(data):
 # ================================================================
 def build_debug_panel(data):
     """构建左侧调试面板 HTML/CSS/JS — 完全自包含。"""
-    _safe_json = json.dumps(data, ensure_ascii=False).replace('</script>', '<\\/script>')
+    # JSON 中包含完整 DOM（有 <script>、<!-- --> 等），必须转义所有 <
+    _safe_json = json.dumps(data, ensure_ascii=False).replace('<', '\\u003c')
     return f"""
 <style id="__dbg_style__">
 #__dbg_toggle__ {{
@@ -602,7 +611,7 @@ def build_debug_panel(data):
   function showNetwork() {{
     var filter = '<input type="text" placeholder="搜索 URL..." oninput="__dbgFilterNet__(this.value)">' +
       ['全部','成功','失败','fetch','xhr'].map(function(f) {{
-        return '<span class="fbtn" onclick="__dbgFilterNetType__(\\'' + f + '\\')">' + f + '</span>';
+        return '<span class="fbtn" data-netfilter="' + f + '">' + f + '</span>';
       }}).join('');
 
     var rows = network.map(function(e, i) {{
@@ -630,7 +639,11 @@ def build_debug_panel(data):
     }});
   }};
 
-  window.__dbgFilterNetType__ = function(type) {{
+  // Network 过滤 — 事件委托
+  document.addEventListener('click', function(ev) {{
+    var el = ev.target.closest('[data-netfilter]');
+    if (!el) return;
+    var type = el.getAttribute('data-netfilter');
     document.querySelectorAll('#__dbg_net_tbody__ tr').forEach(function(tr) {{
       var e = network[+tr.dataset.idx] || {{}};
       var show = true;
@@ -640,7 +653,7 @@ def build_debug_panel(data):
       else if (type === 'xhr') show = e.type === 'xhr';
       tr.style.display = show ? '' : 'none';
     }});
-  }};
+  }});
 
   window.__dbgNetDetail__ = function(i) {{
     var e = network[i];
@@ -703,13 +716,15 @@ def build_debug_panel(data):
   function showLogs() {{
     var filter = '<input type="text" placeholder="搜索..." oninput="__dbgFilterLogs__(this.value)">' +
       ['全部','log','warn','error','info','debug','uncaught'].map(function(f) {{
-        return '<span class="fbtn" onclick="__dbgFilterLogLevel__(\\'' + f + '\\')">' + f + '</span>';
+        return '<span class="fbtn" data-logfilter="' + f + '">' + f + '</span>';
       }}).join('');
     var rows = logs.map(function(e, i) {{
       var t = e.ts ? new Date(e.ts).toLocaleTimeString() : '';
-      return '<tr data-idx="' + i + '"><td style="color:#6c7086;white-space:nowrap">' + t + '</td>' +
+      var msg = e.message || '';
+      var preview = _esc(msg.substring(0, 300)) + (msg.length > 300 ? '…' : '');
+      return '<tr data-idx="' + i + '" style="cursor:pointer"><td style="color:#6c7086;white-space:nowrap">' + t + '</td>' +
         '<td><span class="badge-level lvl-' + e.level + '">' + e.level + '</span></td>' +
-        '<td>' + _esc((e.message||'').substring(0, 300)) + '</td></tr>';
+        '<td>' + preview + '</td></tr>';
     }}).join('');
     openModal('Console 日志 (' + logs.length + ')', filter,
       '<table><thead><tr><th>时间</th><th>级别</th><th>消息</th></tr></thead><tbody id="__dbg_log_tbody__">' + rows + '</tbody></table>');
@@ -722,22 +737,44 @@ def build_debug_panel(data):
       tr.style.display = (e.message||'').toLowerCase().includes(q) ? '' : 'none';
     }});
   }};
-  window.__dbgFilterLogLevel__ = function(lv) {{
+  // Console 过滤 — 事件委托
+  document.addEventListener('click', function(ev) {{
+    var el = ev.target.closest('[data-logfilter]');
+    if (!el) return;
+    var lv = el.getAttribute('data-logfilter');
     document.querySelectorAll('#__dbg_log_tbody__ tr').forEach(function(tr) {{
       var e = logs[+tr.dataset.idx] || {{}};
       tr.style.display = (lv === '全部' || e.level === lv) ? '' : 'none';
     }});
-  }};
+  }});
+
+  // Console 行点击 — 展开完整日志 + JSON 格式化
+  document.addEventListener('click', function(ev) {{
+    var tr = ev.target.closest('#__dbg_log_tbody__ tr');
+    if (!tr) return;
+    var e = logs[+tr.dataset.idx];
+    if (!e) return;
+    var msg = e.message || '';
+    var formatted = _tryJson(msg);
+    var html = '<div class="d-section">';
+    html += '<div class="d-kv"><div class="dk">时间</div><div class="dv">' + (e.ts ? new Date(e.ts).toLocaleString() : 'N/A') + '</div>';
+    html += '<div class="dk">级别</div><div class="dv"><span class="badge-level lvl-' + e.level + '">' + e.level + '</span></div>';
+    if (e.filename) html += '<div class="dk">位置</div><div class="dv">' + _esc(e.filename) + (e.lineno ? ':' + e.lineno : '') + '</div>';
+    html += '</div></div>';
+    html += '<div class="d-section"><div class="d-section-title">完整内容 <button class="d-copy" onclick="navigator.clipboard.writeText(this.parentElement.nextElementSibling.textContent)">复制</button></div>';
+    html += '<pre class="d-pre" style="max-height:400px">' + _esc(formatted) + '</pre></div>';
+    openDetail(e.level.toUpperCase() + ' 日志详情', html);
+  }});
 
   // ---- 存储 ----
   function showStorage() {{
     var ls = storage.localStorage || {{}};
     var ss = storage.sessionStorage || {{}};
     var ck = storage.cookies || '';
-    var filter = '<span class="fbtn active" onclick="__dbgStorageTab__(\\'ls\\',this)">localStorage (' + Object.keys(ls).length + ')</span>' +
-      '<span class="fbtn" onclick="__dbgStorageTab__(\\'ss\\',this)">sessionStorage (' + Object.keys(ss).length + ')</span>' +
-      '<span class="fbtn" onclick="__dbgStorageTab__(\\'ck\\',this)">cookies</span>' +
-      '<span class="fbtn" onclick="__dbgStorageTab__(\\'idb\\',this)">IndexedDB</span>';
+    var filter = '<span class="fbtn active" data-stab="ls">localStorage (' + Object.keys(ls).length + ')</span>' +
+      '<span class="fbtn" data-stab="ss">sessionStorage (' + Object.keys(ss).length + ')</span>' +
+      '<span class="fbtn" data-stab="ck">cookies</span>' +
+      '<span class="fbtn" data-stab="idb">IndexedDB</span>';
 
     function kvTable(obj) {{
       return '<table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>' +
@@ -770,14 +807,18 @@ def build_debug_panel(data):
 
     openModal('存储', filter, body);
   }}
-  window.__dbgStorageTab__ = function(tab, el) {{
+  // Storage tab 切换 — 用事件委托，避免 innerHTML onclick 不生效
+  document.addEventListener('click', function(ev) {{
+    var el = ev.target.closest('[data-stab]');
+    if (!el) return;
+    var tab = el.getAttribute('data-stab');
     ['ls','ss','ck','idb'].forEach(function(t) {{
-      var e = document.getElementById('__dbg_st_' + t);
+      var e = document.getElementById('__dbg_st_' + t + '__');
       if (e) e.style.display = t === tab ? '' : 'none';
     }});
     el.parentElement.querySelectorAll('.fbtn').forEach(function(b) {{ b.classList.remove('active'); }});
     el.classList.add('active');
-  }};
+  }});
 
   // ---- 表单 ----
   function showForms() {{
@@ -905,6 +946,7 @@ def build_page(data, assets_dir=None):
 class LocalEnvServer(BaseHTTPRequestHandler):
     page_html = ''
     assets_dir = None
+    origin_base = ''  # 原始站点 base URL，用于代理静态资源
     server_ref = None  # 引用 HTTPServer 实例，用于关闭
 
     def do_GET(self):
@@ -943,11 +985,32 @@ class LocalEnvServer(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
-        # 静态资源 404
+        # 静态资源：尝试从原始服务器代理
         ext = self.path.split('?')[0].split('.')[-1].lower()
         if ext in ('js', 'css', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'ico',
                     'woff', 'woff2', 'ttf', 'eot', 'mp4', 'webm', 'mp3',
-                    'json', 'map', 'm3u8', 'ts', 'webp'):
+                    'json', 'map', 'm3u8', 'ts', 'webp', 'avif'):
+            if self.origin_base:
+                proxy_url = self.origin_base.rstrip('/') + self.path
+                content = _fetch_url(proxy_url, timeout=8)
+                if content and len(content) > 0:
+                    mime_map = {
+                        'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+                        'gif': 'image/gif', 'svg': 'image/svg+xml', 'ico': 'image/x-icon',
+                        'webp': 'image/webp', 'avif': 'image/avif',
+                        'css': 'text/css', 'js': 'application/javascript',
+                        'woff': 'font/woff', 'woff2': 'font/woff2',
+                        'ttf': 'font/ttf', 'eot': 'application/vnd.ms-fontobject',
+                        'mp4': 'video/mp4', 'webm': 'video/webm', 'mp3': 'audio/mpeg',
+                        'json': 'application/json', 'map': 'application/json',
+                    }
+                    self.send_response(200)
+                    self.send_header('Content-Type', mime_map.get(ext, 'application/octet-stream'))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Cache-Control', 'public, max-age=86400')
+                    self.end_headers()
+                    self.wfile.write(content)
+                    return
             self.send_response(404)
             self.end_headers()
             return
@@ -1003,10 +1066,65 @@ class LocalEnvServer(BaseHTTPRequestHandler):
 # ================================================================
 # 7. 主入口
 # ================================================================
+_cli_password = [None]  # 通过 --password 传入时使用（用列表避免 global）
+
+def _decrypt_pghost(filepath):
+    """解密 .pghost 加密快照文件 (AES-256-GCM + PBKDF2)"""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+    except ImportError:
+        print("[!] 解密需要 cryptography 库，正在安装...")
+        import subprocess
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'cryptography', '-q'])
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+
+    with open(filepath, 'rb') as f:
+        raw = f.read()
+
+    magic = raw[:6]
+    if magic != b'PGHOST':
+        raise ValueError("不是有效的 .pghost 加密文件")
+
+    # version = raw[6]  # 目前只有 v1
+    salt = raw[7:23]
+    iv = raw[23:35]
+    ciphertext = raw[35:]
+
+    password = _cli_password[0] or getpass.getpass('[PageGhost] 输入快照密码: ')
+
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
+    key = kdf.derive(password.encode('utf-8'))
+
+    aesgcm = AESGCM(key)
+    try:
+        plaintext = aesgcm.decrypt(iv, ciphertext, None)
+    except Exception:
+        print("[!] 密码错误，解密失败")
+        sys.exit(1)
+
+    return json.loads(plaintext.decode('utf-8'))
+
+
+def _load_snapshot(filepath):
+    """加载快照：自动判断明文 JSON 或加密 .pghost"""
+    with open(filepath, 'rb') as f:
+        header = f.read(6)
+
+    if header == b'PGHOST':
+        print("[*] 检测到加密快照，需要输入密码")
+        return _decrypt_pghost(filepath)
+    else:
+        with open(filepath, 'r') as f:
+            return json.load(f)
+
+
 def serve(snapshot_path, port=8080, assets_dir=None, no_open=False):
     print(f"[*] 读取快照: {snapshot_path}")
-    with open(snapshot_path, 'r') as f:
-        data = json.load(f)
+    data = _load_snapshot(snapshot_path)
 
     meta = data.get('metadata', {})
     fp = data.get('fingerprint', {})
@@ -1026,6 +1144,12 @@ def serve(snapshot_path, port=8080, assets_dir=None, no_open=False):
 
     LocalEnvServer.page_html = page_html
     LocalEnvServer.assets_dir = assets_dir
+    # 从快照 URL 提取原始站点 base，用于代理静态资源（图片、字体等）
+    origin_url = meta.get('url', '')
+    if origin_url:
+        parsed = urllib.parse.urlparse(origin_url)
+        LocalEnvServer.origin_base = f"{parsed.scheme}://{parsed.netloc}"
+        print(f"[*] 静态资源代理: {LocalEnvServer.origin_base}")
 
     # 尝试多个端口
     server = None
@@ -1079,7 +1203,11 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080, help="端口 (默认 8080)")
     parser.add_argument("--assets", dest="assets_dir", help="静态资源目录 (crawler 输出)")
     parser.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
+    parser.add_argument("--password", dest="password", help=".pghost 解密密码（不指定则交互输入）")
     args = parser.parse_args()
+
+    if args.password:
+        _cli_password[0] = args.password
 
     if not os.path.isfile(args.snapshot):
         print(f"[!] 文件不存在: {args.snapshot}")

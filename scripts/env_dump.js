@@ -122,8 +122,6 @@
   }
 
   function stopRecordingAndExport() {
-    // !! 这个函数必须在用户点击的同步调用栈内执行 !!
-    // !! 不能有任何 await / Promise / setTimeout !!
     if (!isRecording) return;
     isRecording = false;
     recordingEndTime = Date.now();
@@ -131,8 +129,17 @@
 
     console.log('[env_dump] 录制结束 ⏹ 时长: ' + ((recordingEndTime - recordingStartTime) / 1000).toFixed(1) + 's');
 
-    // 同步构建快照
-    dumpEnvironmentSync();
+    // 弹出密码输入框（prompt 是同步的，不打断调用栈）
+    var pwd = prompt('[PageGhost] 设置快照密码（留空则不加密）：');
+
+    if (pwd) {
+      // 有密码 → 异步加密后下载
+      _showIndicator('⏳', '正在加密...');
+      _buildAndEncryptSnapshot(pwd);
+    } else {
+      // 无密码 → 同步明文下载（兼容 Safari 用户手势）
+      _dumpPlain();
+    }
   }
 
 
@@ -716,125 +723,183 @@
   }
 
   // ============================================================
-  // 8. 同步导出（在用户点击调用栈内执行，确保 a.click() 下载生效）
-  //    所有异步数据（IndexedDB / SW / Permissions）在录制期间已预缓存
+  // 8. 快照构建 + 导出（明文 / 加密）
   // ============================================================
-  function dumpEnvironmentSync() {
-    try {
-      // 收集还在活跃的 WebSocket 连接
-      for (const entry of _activeWsEntries) {
-        if (entry.messages.length > 0 && !wsLog.includes(entry)) {
-          wsLog.push(entry);
-        }
+
+  function _buildSnapshot() {
+    // 收集还在活跃的 WebSocket 连接
+    for (const entry of _activeWsEntries) {
+      if (entry.messages.length > 0 && !wsLog.includes(entry)) {
+        wsLog.push(entry);
       }
+    }
 
-      const snapshot = {
-        version: 3,
+    return {
+      version: 3,
 
-        metadata: {
-          timestamp: new Date().toISOString(),
-          url: window.location.href,
-          userAgent: navigator.userAgent,
-          title: document.title,
-          referrer: document.referrer
+      metadata: {
+        timestamp: new Date().toISOString(),
+        url: window.location.href,
+        userAgent: navigator.userAgent,
+        title: document.title,
+        referrer: document.referrer
+      },
+
+      recording: {
+        startTime: new Date(recordingStartTime).toISOString(),
+        endTime: new Date(recordingEndTime || Date.now()).toISOString(),
+        durationMs: (recordingEndTime || Date.now()) - recordingStartTime
+      },
+
+      storage: {
+        localStorage: _getStorage(localStorage),
+        sessionStorage: _getStorage(sessionStorage),
+        cookies: document.cookie
+      },
+
+      indexedDB: _cachedIDB,
+
+      runtime: {
+        initialState: window.__INITIAL_STATE__ || null,
+        appState: window.__APP_STATE__ || null,
+        nuxtData: window.__NUXT__ || null,
+        nextData: window.__NEXT_DATA__ || null,
+        historyState: history.state
+      },
+
+      fingerprint: {
+        screen: {
+          width: screen.width, height: screen.height,
+          availWidth: screen.availWidth, availHeight: screen.availHeight,
+          dpr: window.devicePixelRatio, colorDepth: screen.colorDepth
         },
+        viewport: { innerWidth: window.innerWidth, innerHeight: window.innerHeight },
+        touch: 'ontouchstart' in window,
+        maxTouchPoints: navigator.maxTouchPoints || 0,
+        gpu: (() => {
+          try {
+            const canvas = document.createElement('canvas');
+            const gl = canvas.getContext('webgl');
+            const ext = gl ? gl.getExtension('WEBGL_debug_renderer_info') : null;
+            return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'unknown';
+          } catch (_) { return 'unknown'; }
+        })(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        timezoneOffset: new Date().getTimezoneOffset(),
+        language: navigator.language,
+        languages: Array.from(navigator.languages || []),
+        platform: (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '',
+        hardwareConcurrency: navigator.hardwareConcurrency || 0,
+        deviceMemory: navigator.deviceMemory || 0,
+        connection: navigator.connection ? {
+          effectiveType: navigator.connection.effectiveType,
+          downlink: navigator.connection.downlink,
+          rtt: navigator.connection.rtt
+        } : null,
+        prefersColorScheme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
+        prefersReducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      },
 
-        recording: {
-          startTime: new Date(recordingStartTime).toISOString(),
-          endTime: new Date(recordingEndTime || Date.now()).toISOString(),
-          durationMs: (recordingEndTime || Date.now()) - recordingStartTime
-        },
+      interaction: {
+        scroll: { x: window.scrollX, y: window.scrollY },
+        focus: document.activeElement ? _cssSelector(document.activeElement) : null,
+        selection: (() => {
+          const sel = window.getSelection();
+          return sel && sel.toString() ? sel.toString() : null;
+        })()
+      },
 
-        storage: {
-          localStorage: _getStorage(localStorage),
-          sessionStorage: _getStorage(sessionStorage),
-          cookies: document.cookie
-        },
+      formState: _captureFormState(),
+      domSnapshot: _captureCleanDOM(),
+      inlinedStyles: _cachedStyles,
+      cssVariables: _captureCSSVariables(),
+      networkReplay: networkLog,
+      wsReplay: wsLog,
+      consoleLogs: consoleLogs,
+      serviceWorkers: _cachedSW,
+      permissions: _cachedPerms
+    };
+  }
 
-        indexedDB: _cachedIDB,
+  // 下载文件
+  function _downloadFile(data, filename, mimeType) {
+    const blob = new Blob([data], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
+  }
 
-        runtime: {
-          initialState: window.__INITIAL_STATE__ || null,
-          appState: window.__APP_STATE__ || null,
-          nuxtData: window.__NUXT__ || null,
-          nextData: window.__NEXT_DATA__ || null,
-          historyState: history.state
-        },
-
-        fingerprint: {
-          screen: {
-            width: screen.width, height: screen.height,
-            availWidth: screen.availWidth, availHeight: screen.availHeight,
-            dpr: window.devicePixelRatio, colorDepth: screen.colorDepth
-          },
-          viewport: { innerWidth: window.innerWidth, innerHeight: window.innerHeight },
-          touch: 'ontouchstart' in window,
-          maxTouchPoints: navigator.maxTouchPoints || 0,
-          gpu: (() => {
-            try {
-              const canvas = document.createElement('canvas');
-              const gl = canvas.getContext('webgl');
-              const ext = gl ? gl.getExtension('WEBGL_debug_renderer_info') : null;
-              return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : 'unknown';
-            } catch (_) { return 'unknown'; }
-          })(),
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-          timezoneOffset: new Date().getTimezoneOffset(),
-          language: navigator.language,
-          languages: Array.from(navigator.languages || []),
-          platform: (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '',
-          hardwareConcurrency: navigator.hardwareConcurrency || 0,
-          deviceMemory: navigator.deviceMemory || 0,
-          connection: navigator.connection ? {
-            effectiveType: navigator.connection.effectiveType,
-            downlink: navigator.connection.downlink,
-            rtt: navigator.connection.rtt
-          } : null,
-          prefersColorScheme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
-          prefersReducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches
-        },
-
-        interaction: {
-          scroll: { x: window.scrollX, y: window.scrollY },
-          focus: document.activeElement ? _cssSelector(document.activeElement) : null,
-          selection: (() => {
-            const sel = window.getSelection();
-            return sel && sel.toString() ? sel.toString() : null;
-          })()
-        },
-
-        formState: _captureFormState(),
-        domSnapshot: _captureCleanDOM(),
-        inlinedStyles: _cachedStyles,
-        cssVariables: _captureCSSVariables(),
-        networkReplay: networkLog,
-        wsReplay: wsLog,
-        consoleLogs: consoleLogs,
-        serviceWorkers: _cachedSW,
-        permissions: _cachedPerms
-      };
-
-      // 同步导出 — a.click() 在用户手势调用栈内，Safari 也能触发下载
-      const json = JSON.stringify(snapshot);
+  // 明文导出（同步，兼容 Safari 手势）
+  function _dumpPlain() {
+    try {
+      const json = JSON.stringify(_buildSnapshot());
       const filename = 'env_snapshot_' + Date.now() + '.json';
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
+      _downloadFile(json, filename, 'application/json');
 
       const sizeMB = (json.length / 1024 / 1024).toFixed(2);
       _showIndicator('✓', `已导出 ${filename} (${sizeMB} MB, ${networkLog.length} API)`);
       setTimeout(_hideIndicator, 5000);
       console.log(`[env_dump] 导出成功: ${filename} (${sizeMB} MB, ${networkLog.length} network, ${consoleLogs.length} console)`);
-
     } catch (e) {
       console.error('[env_dump] 导出失败:', e);
       _showIndicator('✗', '导出失败: ' + e.message);
+      setTimeout(_hideIndicator, 8000);
+    }
+  }
+
+  // 加密导出（异步，AES-256-GCM）
+  // 文件格式: "PGHOST" (6B) + version (1B) + salt (16B) + iv (12B) + ciphertext
+  async function _buildAndEncryptSnapshot(password) {
+    try {
+      const json = JSON.stringify(_buildSnapshot());
+      const enc = new TextEncoder();
+
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+
+      // PBKDF2 派生密钥
+      const keyMaterial = await crypto.subtle.importKey(
+        'raw', enc.encode(password), 'PBKDF2', false, ['deriveKey']
+      );
+      const key = await crypto.subtle.deriveKey(
+        { name: 'PBKDF2', salt: salt, iterations: 100000, hash: 'SHA-256' },
+        keyMaterial,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt']
+      );
+
+      // AES-GCM 加密
+      const encrypted = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv: iv }, key, enc.encode(json)
+      );
+
+      // 拼接: PGHOST + 0x01 + salt(16) + iv(12) + ciphertext
+      const magic = enc.encode('PGHOST');
+      const version = new Uint8Array([1]);
+      const result = new Uint8Array(6 + 1 + 16 + 12 + encrypted.byteLength);
+      let off = 0;
+      result.set(magic, off); off += 6;
+      result.set(version, off); off += 1;
+      result.set(salt, off); off += 16;
+      result.set(iv, off); off += 12;
+      result.set(new Uint8Array(encrypted), off);
+
+      const filename = 'env_snapshot_' + Date.now() + '.pghost';
+      _downloadFile(result, filename, 'application/octet-stream');
+
+      const sizeMB = (result.byteLength / 1024 / 1024).toFixed(2);
+      _showIndicator('🔒', `已加密导出 ${filename} (${sizeMB} MB)`);
+      setTimeout(_hideIndicator, 5000);
+      console.log(`[env_dump] 加密导出成功: ${filename} (${sizeMB} MB, ${networkLog.length} network, ${consoleLogs.length} console)`);
+    } catch (e) {
+      console.error('[env_dump] 加密导出失败:', e);
+      _showIndicator('✗', '加密失败: ' + e.message);
       setTimeout(_hideIndicator, 8000);
     }
   }

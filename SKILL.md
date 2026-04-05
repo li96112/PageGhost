@@ -8,21 +8,26 @@ metadata: {"openclaw":{"emoji":"👻","requires":{"bins":["python3"]},"homepage"
 
 > 无形采集，还原现场
 
-浏览器侧隐身录制用户环境 → 导出 JSON → 本地一键还原页面 + 调试面板。
+浏览器侧隐身录制用户环境 → 导出 JSON 或加密 .pghost → 本地一键还原页面 + 调试面板。
 
 ## Agent 调用方式
 
-当用户提供了 `env_snapshot_*.json` 文件，或提到"还原环境"、"查看用户现场"、"PageGhost"时，按以下步骤执行：
+当用户提供了 `env_snapshot_*.json` 或 `env_snapshot_*.pghost` 文件，或提到"还原环境"、"查看用户现场"、"PageGhost"时，按以下步骤执行：
+
+**重要：`.pghost` 文件是 AES-256-GCM 加密的快照，必须先向用户询问密码才能解密还原。**
 
 ```bash
-# 1. 还原页面 + 调试面板（核心命令）
-python3 {baseDir}/scripts/mount_env.py --import <snapshot.json路径>
+# 1. 还原页面
+# .json 明文快照直接还原：
+python3 {baseDir}/scripts/mount_env.py --import <快照文件路径>
+# .pghost 加密快照需要密码（先向用户询问密码，再通过 --password 传入）：
+python3 {baseDir}/scripts/mount_env.py --import <快照文件路径> --password <用户提供的密码>
 
 # 2. 如果页面样式缺失，先爬取静态资源再还原
-python3 {baseDir}/scripts/crawler.py --snapshot <snapshot.json路径> --output /tmp/pageghost_assets
-python3 {baseDir}/scripts/mount_env.py --import <snapshot.json路径> --assets /tmp/pageghost_assets
+python3 {baseDir}/scripts/crawler.py --snapshot <快照文件路径> --output /tmp/pageghost_assets
+python3 {baseDir}/scripts/mount_env.py --import <快照文件路径> --assets /tmp/pageghost_assets
 
-# 3. 只分析快照数据（不还原页面）
+# 3. 只分析快照数据（不还原页面）— 仅支持 .json 明文快照
 python3 -c "
 import json
 with open('<snapshot.json路径>') as f:
@@ -38,16 +43,19 @@ for e in data.get('networkReplay', []):
 ```
 
 ### 触发关键词
-- 用户发送 `.json` 快照文件
+- 用户发送 `.json` 或 `.pghost` 快照文件
 - "还原用户环境" / "看看用户现场" / "PageGhost"
 - "用户报了个 bug，这是他的快照"
 - "帮我分析这个环境快照"
+- 收到 `.pghost` 文件时，**必须先问用户密码**
 
 ### 部署采集脚本
 当用户需要在自己的网页上部署采集脚本时，告知：
 - 将 `scripts/env_dump.js` 引入到页面 `<head>` 中
-- 用户连续快速点击 15 次开始录制，再 15 次结束并导出 JSON
+- 用户连续快速点击 15 次开始录制，再 15 次结束，弹出密码框后导出
+- 设密码 → 导出加密 `.pghost`；留空 → 导出明文 `.json`
 - 脚本完全隐身，不影响页面任何交互
+- 也可通过控制台一行加载：`fetch('https://raw.githubusercontent.com/li96112/PageGhost/main/scripts/pg_console.min.js').then(r=>r.text()).then(eval)`
 
 ## 架构总览
 
@@ -56,12 +64,12 @@ for e in data.get('networkReplay', []):
      |
      |-- 连续快速点击 15 次 (间隔<500ms) --> 开始录制 ⏺
      |-- 用户正常操作...（网络/Console/WS 只录制此段）
-     |-- 再次连续快速点击 15 次 --> 同步导出 snapshot.json（第 15 下触发下载）
+     |-- 再次连续快速点击 15 次 --> 弹出密码框 --> 导出 .pghost(加密) 或 .json(明文)
      |-- 刷新页面 = 重置录制状态，需重新点击 15 次开始
      |
      也可通过 JS：window.__ENV_DUMP__.start() / .stop()
 
-snapshot.json
+snapshot.json / snapshot.pghost
      |
      +---> mount_env.py --启动本地 HTTP Server--> http://localhost:8080
      |     (DOM + 状态注入 + Network Replay 浏览器端拦截 + 请求/响应日志)
@@ -119,7 +127,9 @@ snapshot.json
 
 ### 录制控制
 - **连续快速点击 15 次**（每两次间隔 < 500ms）：开始录制，页面右下角出现红色 REC 指示器
-- **再次连续快速点击 15 次**：结束录制，**同步**导出 JSON（第 15 下的用户手势内触发 `a.click()` 下载，兼容 Safari）
+- **再次连续快速点击 15 次**：结束录制，弹出密码输入框
+  - **输入密码** → 导出 AES-256-GCM 加密的 `.pghost` 文件（没密码打不开）
+  - **留空确定** → 导出明文 `.json` 文件（和以前一样）
 - **JS API**：`window.__ENV_DUMP__.start()` 开始 / `window.__ENV_DUMP__.stop()` 结束
 - **刷新 = 重置**：刷新页面后录制状态清空，需重新点击 15 次开始新录制
 - **隐身模式**：点击监听纯被动计数，不调用 `stopPropagation` / `preventDefault`，不影响页面任何原有点击事件
@@ -141,7 +151,8 @@ snapshot.json
 - **CSS.escape polyfill**：兼容不支持 CSS.escape 的浏览器 / WebView
 
 ### 导出机制
-- 全同步导出：从 snapshot 构建到 `a.click()` 零 await，确保在用户手势调用栈内
+- **明文导出（留空）**：全同步导出 `.json`，从 snapshot 构建到 `a.click()` 零 await，确保在用户手势调用栈内
+- **加密导出（设密码）**：异步 AES-256-GCM 加密后导出 `.pghost`，格式：`PGHOST` 魔数 + PBKDF2 盐值 + IV + 密文
 - 异步数据（IndexedDB / ServiceWorker / Permissions）在录制期间每 3 秒预缓存，导出时直接读缓存
 - 导出时自动排除 PageGhost 自身注入的 DOM 元素（DevPanel、指示器等）
 - Response body 超过 5MB 跳过 Base64 编码，只记录大小
@@ -161,9 +172,11 @@ snapshot.json
 
 ### 工作方式
 不依赖 Playwright，不需要原站在线。直接启动本地 HTTP 服务器，浏览器打开即用。
+自动识别 `.json`（明文）和 `.pghost`（加密）两种格式，加密文件会提示输入密码。
 
 ```
-python3 {baseDir}/scripts/mount_env.py --import snapshot.json
+python3 {baseDir}/scripts/mount_env.py --import snapshot.json          # 明文快照
+python3 {baseDir}/scripts/mount_env.py --import snapshot.pghost        # 加密快照（需输入密码）
 python3 {baseDir}/scripts/mount_env.py --import snapshot.json --port 9090
 python3 {baseDir}/scripts/mount_env.py --import snapshot.json --assets ./crawled_assets
 python3 {baseDir}/scripts/mount_env.py --import snapshot.json --no-open
@@ -171,7 +184,7 @@ python3 {baseDir}/scripts/mount_env.py --import snapshot.json --no-open
 
 ### 还原流程
 ```
-1. 读取 snapshot JSON
+1. 读取快照文件（.pghost 先解密为 JSON，.json 直接读取）
 2. 从 domSnapshot 提取原始 HTML
 3. 在 <head> 最前面注入还原脚本（在页面原始 JS 之前执行）：
    - localStorage / sessionStorage 写入
