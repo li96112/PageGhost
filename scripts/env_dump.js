@@ -231,6 +231,8 @@
   }
 
   // --- Fetch 拦截 ---
+  const _inflightFetch = []; // 未完成的 fetch 请求
+
   window.fetch = async function (...args) {
     const reqInput = args[0];
     const reqInit = args[1] || {};
@@ -251,8 +253,23 @@
 
     const _MAX_BODY = 5 * 1024 * 1024; // 5MB 上限，超过不录制 body
     const start = Date.now();
+    _capturedFetchXhrUrls.add(url); // 标记，防止 Resource Timing 重复采集
+
+    // 立即记录为 in-flight
+    const inflightEntry = {
+      type: 'fetch', url, method,
+      requestHeaders: reqHeaders, requestBody: reqBody,
+      status: 0, statusText: 'pending', latency: 0, body: null,
+      ts: start, _inflight: true
+    };
+    _inflightFetch.push(inflightEntry);
+    _pushDevNet(inflightEntry);
+
     try {
       const response = await _fetch.apply(this, args);
+      // 完成，从 in-flight 移除
+      const idx = _inflightFetch.indexOf(inflightEntry);
+      if (idx !== -1) _inflightFetch.splice(idx, 1);
       try {
         const clone = response.clone();
         const buf = await clone.arrayBuffer();
@@ -265,6 +282,7 @@
           type: 'fetch', url, method,
           requestHeaders: reqHeaders, requestBody: reqBody,
           status: response.status, statusText: response.statusText,
+          redirected: response.redirected, finalUrl: response.url !== url ? response.url : undefined,
           responseHeaders: resHeaders, latency: Date.now() - start,
           body: bodyB64, ts: start
         };
@@ -282,6 +300,8 @@
       }
       return response;
     } catch (e) {
+      const idx2 = _inflightFetch.indexOf(inflightEntry);
+      if (idx2 !== -1) _inflightFetch.splice(idx2, 1);
       const entry = { type: 'fetch', url, method, requestBody: reqBody, error: e.toString(), latency: Date.now() - start, ts: start };
       _pushDevNet(entry);
       if (isRecording) networkLog.push(entry);
@@ -290,6 +310,8 @@
   };
 
   // --- XMLHttpRequest 拦截 ---
+  const _inflightXhr = []; // 未完成的 XHR 请求（导出时一并写入快照）
+
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     this._dump = { method, url, requestHeaders: {}, start: 0 };
     return _XHROpen.call(this, method, url, ...rest);
@@ -303,27 +325,46 @@
   XMLHttpRequest.prototype.send = function (body) {
     if (this._dump) {
       this._dump.start = Date.now();
+      _capturedFetchXhrUrls.add(new URL(this._dump.url, location.href).href); // 标记去重
       // 同步记录请求体（send 的参数）
+      var reqBody = null;
       if (body !== null && body !== undefined) {
         if (typeof body === 'string') {
-          this._dump.requestBody = body;
+          reqBody = body;
         } else if (body instanceof FormData) {
           const obj = {};
           body.forEach((v, k) => {
             obj[k] = v instanceof File ? { _file: true, name: v.name, size: v.size, type: v.type } : v;
           });
-          this._dump.requestBody = JSON.stringify(obj);
+          reqBody = JSON.stringify(obj);
         } else if (body instanceof ArrayBuffer) {
-          this._dump.requestBody = _arrayBufferToBase64(body);
+          reqBody = _arrayBufferToBase64(body);
         } else if (ArrayBuffer.isView(body)) {
-          this._dump.requestBody = _arrayBufferToBase64(body.buffer);
+          reqBody = _arrayBufferToBase64(body.buffer);
         } else if (body instanceof Blob) {
-          this._dump.requestBody = '[Blob:' + body.size + ']';
+          reqBody = '[Blob:' + body.size + ']';
         } else {
-          try { this._dump.requestBody = String(body); } catch(_) {}
+          try { reqBody = String(body); } catch(_) {}
         }
       }
+      this._dump.requestBody = reqBody;
+
+      // 立即记录为 in-flight（导出时如果还没完成也会包含在快照中）
+      var inflightEntry = {
+        type: 'xhr', url: this._dump.url, method: this._dump.method,
+        requestHeaders: this._dump.requestHeaders, requestBody: reqBody,
+        status: 0, statusText: 'pending', latency: 0, body: null,
+        ts: this._dump.start, _inflight: true
+      };
+      _inflightXhr.push(inflightEntry);
+      this._dump._inflightRef = inflightEntry;
+      _pushDevNet(inflightEntry);
+
       this.addEventListener('loadend', function () {
+        // 从 in-flight 列表移除
+        var idx = _inflightXhr.indexOf(this._dump._inflightRef);
+        if (idx !== -1) _inflightXhr.splice(idx, 1);
+
         var _bodyB64 = null;
         try {
           if (this.response instanceof ArrayBuffer) {
@@ -352,6 +393,17 @@
         _pushDevNet(entry); // 始终采集
         if (isRecording) networkLog.push(entry);
       });
+
+      // 监听上传进度（记录上传总大小，用于还原端模拟进度）
+      if (this.upload) {
+        var _xhrRef = this;
+        this.upload.addEventListener('progress', function (e) {
+          if (_xhrRef._dump._inflightRef) {
+            _xhrRef._dump._inflightRef._uploadTotal = e.total;
+            _xhrRef._dump._inflightRef._uploadLoaded = e.loaded;
+          }
+        });
+      }
     }
     return _XHRSend.call(this, body);
   };
@@ -365,6 +417,24 @@
     });
     return headers;
   }
+
+  // --- 资源加载错误监听（捕获 img/script/link/video 的 404/403 等）---
+  window.addEventListener('error', function (e) {
+    var el = e.target || e.srcElement;
+    if (!el || !el.tagName) return; // 非元素错误跳过
+    var tag = el.tagName.toLowerCase();
+    if (tag === 'img' || tag === 'script' || tag === 'link' || tag === 'video' || tag === 'audio' || tag === 'source' || tag === 'iframe') {
+      var src = el.src || el.href || '';
+      if (!src || src === 'about:blank') return;
+      var entry = {
+        type: 'resource-error', url: src, method: 'GET',
+        initiatorType: tag, status: 0, statusText: 'load failed',
+        error: tag + ' load error', latency: 0, body: null, ts: Date.now()
+      };
+      _pushDevNet(entry);
+      if (isRecording) networkLog.push(entry);
+    }
+  }, true); // capture phase，必须用 true 才能捕获资源错误
 
   // --- WebSocket 拦截 ---
   window.WebSocket = function (url, protocols) {
@@ -400,6 +470,70 @@
   window.WebSocket.CLOSING = _WS.CLOSING;
   window.WebSocket.CLOSED = _WS.CLOSED;
   const _activeWsEntries = [];
+
+  // --- sendBeacon 拦截 ---
+  const _sendBeacon = navigator.sendBeacon ? navigator.sendBeacon.bind(navigator) : null;
+  if (_sendBeacon) {
+    navigator.sendBeacon = function (url, data) {
+      const entry = {
+        type: 'beacon', url: new URL(url, location.href).href, method: 'POST',
+        requestBody: data ? String(data).substring(0, 8192) : null,
+        status: 0, statusText: 'beacon', latency: 0, body: null, ts: Date.now()
+      };
+      _pushDevNet(entry);
+      if (isRecording) networkLog.push(entry);
+      return _sendBeacon(url, data);
+    };
+  }
+
+  // --- Resource Timing 采集（img/script/link/video 等 HTML 标签发起的请求）---
+  const _capturedFetchXhrUrls = new Set(); // 用于去重，避免和 fetch/XHR 重复
+  const _origPushDevNet = _pushDevNet;
+
+  // 包装 _pushDevNet，记录 fetch/xhr 的 URL 用于去重
+  // (不能直接覆盖 _pushDevNet 因为是 function，改为在 entry 层面标记)
+  const _resourceLog = [];
+
+  function _processResourceEntry(entry) {
+    var url = entry.name;
+    // 跳过 data: / blob: / about: / 心跳等
+    if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.indexOf('__heartbeat__') !== -1) return;
+    // 跳过已被 fetch/XHR 捕获的（通过 URL 匹配）
+    if (_capturedFetchXhrUrls.has(url)) return;
+
+    var resEntry = {
+      type: 'resource',
+      url: url,
+      method: 'GET',
+      initiatorType: entry.initiatorType || 'other',
+      status: entry.responseStatus || 0,  // Chrome 109+
+      transferSize: entry.transferSize || 0,
+      encodedBodySize: entry.encodedBodySize || 0,
+      decodedBodySize: entry.decodedBodySize || 0,
+      duration: Math.round(entry.duration),
+      latency: Math.round(entry.responseEnd - entry.requestStart) || Math.round(entry.duration),
+      body: null,
+      ts: Math.round(entry.startTime + performance.timeOrigin)
+    };
+    _resourceLog.push(resEntry);
+    _pushDevNet(resEntry);
+    if (isRecording) networkLog.push(resEntry);
+  }
+
+  // 监听新增资源
+  try {
+    var _resObserver = new PerformanceObserver(function (list) {
+      list.getEntries().forEach(_processResourceEntry);
+    });
+    _resObserver.observe({ type: 'resource', buffered: true });
+  } catch (_poErr) {
+    // fallback: 在 _buildSnapshot 时一次性采集
+  }
+
+  // 在原始 _pushDevNet 调用时标记 URL（用于去重）
+  var _origPushDevNet2 = _pushDevNet;
+  // 我们不能覆盖 const，改为在 fetch/xhr entry 创建时标记
+  // → 在 fetch 拦截和 XHR 拦截中加标记
 
   // ============================================================
   // 2. Console 日志采集（始终采集供 DevPanel 使用，录制期间同时写入 consoleLogs）
@@ -813,7 +947,10 @@
       domSnapshot: _captureCleanDOM(),
       inlinedStyles: _cachedStyles,
       cssVariables: _captureCSSVariables(),
-      networkReplay: networkLog,
+      networkReplay: networkLog.concat(
+        _inflightFetch.map(function(e) { e.statusText = 'in-flight'; e.latency = Date.now() - e.ts; delete e._inflight; return e; }),
+        _inflightXhr.map(function(e) { e.statusText = 'in-flight'; e.latency = Date.now() - e.ts; delete e._inflight; return e; })
+      ),
       wsReplay: wsLog,
       consoleLogs: consoleLogs,
       serviceWorkers: _cachedSW,
@@ -1045,47 +1182,48 @@
   // 样式
   // ================================================================
   var CSS =
-'#__pg_panel__{position:fixed;left:0;right:0;bottom:0;height:55vh;z-index:2147483646;' +
-'background:#1e1e1e;color:#d4d4d4;font-family:"SF Mono",Monaco,Consolas,monospace;' +
-'font-size:12px;display:flex;flex-direction:column;border-top:2px solid #007acc}' +
-'#__pg_panel__ *{box-sizing:border-box}' +
+'#__pg_panel__{all:initial;position:fixed;left:0;right:0;bottom:0;height:55vh;z-index:2147483646;' +
+'background:#1e1e1e !important;color:#d4d4d4 !important;font-family:"SF Mono",Monaco,Consolas,monospace;' +
+'font-size:12px;display:flex;flex-direction:column;border-top:2px solid #007acc;line-height:1.4}' +
+'#__pg_panel__ *{box-sizing:border-box;font-family:inherit;line-height:inherit}' +
+'#__pg_panel__ div,#__pg_panel__ span,#__pg_panel__ pre,#__pg_panel__ p,#__pg_panel__ td,#__pg_panel__ th,#__pg_panel__ li{color:inherit}' +
 '#__pg_tabs__{display:flex;background:#252526;border-bottom:1px solid #3c3c3c;flex-shrink:0}' +
-'#__pg_tabs__ button{background:none;border:none;color:#888;padding:8px 14px;font-size:12px;' +
+'#__pg_tabs__ button{background:none;border:none;color:#888 !important;padding:8px 14px;font-size:12px;' +
 'font-family:inherit;cursor:pointer;border-bottom:2px solid transparent}' +
-'#__pg_tabs__ button.active{color:#fff;border-bottom-color:#007acc}' +
-'#__pg_tabs__ button:last-child{margin-left:auto;color:#888;font-size:16px;padding:8px 12px}' +
+'#__pg_tabs__ button.active{color:#fff !important;border-bottom-color:#007acc}' +
+'#__pg_tabs__ button:last-child{margin-left:auto;color:#888 !important;font-size:16px;padding:8px 12px}' +
 '#__pg_body__{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0}' +
 '.__pg_row__{padding:4px 8px;border-bottom:1px solid #2d2d2d;word-break:break-all;white-space:pre-wrap}' +
-'.__pg_row__.log{color:#d4d4d4}.__pg_row__.info{color:#3dc9b0}' +
-'.__pg_row__.warn{color:#cca700;background:rgba(204,167,0,.08)}' +
-'.__pg_row__.error,.__pg_row__.uncaught,.__pg_row__.unhandledrejection{color:#f44747;background:rgba(244,71,71,.08)}' +
-'.__pg_row__.debug{color:#888}.__pg_row__:active{background:#2a2d2e}' +
+'.__pg_row__.log{color:#d4d4d4 !important}.__pg_row__.info{color:#3dc9b0 !important}' +
+'.__pg_row__.warn{color:#cca700 !important;background:rgba(204,167,0,.08) !important}' +
+'.__pg_row__.error,.__pg_row__.uncaught,.__pg_row__.unhandledrejection{color:#f44747 !important;background:rgba(244,71,71,.08) !important}' +
+'.__pg_row__.debug{color:#888 !important}.__pg_row__:active{background:#2a2d2e !important}' +
 '.__pg_net_row__{padding:6px 8px;border-bottom:1px solid #2d2d2d}' +
-'.__pg_net_row__ .url{color:#569cd6;word-break:break-all}' +
-'.__pg_net_row__ .method{color:#dcdcaa;margin-right:6px}' +
+'.__pg_net_row__ .url{color:#569cd6 !important;word-break:break-all}' +
+'.__pg_net_row__ .method{color:#dcdcaa !important;margin-right:6px}' +
 '.__pg_net_row__ .status{margin-left:6px}' +
-'.__pg_net_row__ .status.ok{color:#4ec9b0}.__pg_net_row__ .status.err{color:#f44747}' +
-'.__pg_net_row__ .latency{color:#888;margin-left:6px}' +
-'.__pg_net_detail__{padding:6px 12px;background:#252526;color:#ccc;font-size:11px;' +
+'.__pg_net_row__ .status.ok{color:#4ec9b0 !important}.__pg_net_row__ .status.err{color:#f44747 !important}' +
+'.__pg_net_row__ .latency{color:#888 !important;margin-left:6px}' +
+'.__pg_net_detail__{padding:6px 12px;background:#252526 !important;color:#ccc !important;font-size:11px;' +
 'display:none;word-break:break-all;white-space:pre-wrap;max-height:200px;overflow-y:auto}' +
 '.__pg_store_section__{padding:6px 8px}' +
-'.__pg_store_section__ h4{color:#569cd6;margin:8px 0 4px;font-size:12px}' +
+'.__pg_store_section__ h4{color:#569cd6 !important;margin:8px 0 4px;font-size:12px}' +
 '.__pg_store_kv__{padding:2px 0;border-bottom:1px solid #2d2d2d}' +
-'.__pg_store_kv__ .k{color:#9cdcfe}.__pg_store_kv__ .v{color:#ce9178;margin-left:4px;word-break:break-all}' +
+'.__pg_store_kv__ .k{color:#9cdcfe !important}.__pg_store_kv__ .v{color:#ce9178 !important;margin-left:4px;word-break:break-all}' +
 '.__pg_el_info__{padding:8px}' +
-'.__pg_el_info__ .tag{color:#569cd6;font-size:14px;font-weight:bold}' +
-'.__pg_el_info__ .attr{color:#9cdcfe}.__pg_el_info__ .val{color:#ce9178}' +
-'.__pg_el_info__ .sec{color:#dcdcaa;margin-top:8px;display:block;font-weight:bold}' +
-'.__pg_el_info__ .prop{padding:1px 0}.__pg_el_info__ .prop .n{color:#9cdcfe}.__pg_el_info__ .prop .v{color:#d4d4d4}' +
+'.__pg_el_info__ .tag{color:#569cd6 !important;font-size:14px;font-weight:bold}' +
+'.__pg_el_info__ .attr{color:#9cdcfe !important}.__pg_el_info__ .val{color:#ce9178 !important}' +
+'.__pg_el_info__ .sec{color:#dcdcaa !important;margin-top:8px;display:block;font-weight:bold}' +
+'.__pg_el_info__ .prop{padding:1px 0}.__pg_el_info__ .prop .n{color:#9cdcfe !important}.__pg_el_info__ .prop .v{color:#d4d4d4 !important}' +
 '#__pg_inspect_overlay__{position:fixed;z-index:2147483645;pointer-events:none;' +
 'border:2px solid #007acc;background:rgba(0,122,204,.15);transition:all .1s}' +
 '#__pg_inspect_hint__{position:fixed;z-index:2147483645;background:rgba(0,0,0,.85);' +
 'color:#fff;padding:4px 8px;font-size:11px;font-family:monospace;border-radius:4px;' +
 'pointer-events:none;white-space:nowrap}' +
 '.__pg_filter__{display:flex;background:#252526;padding:4px 8px;gap:4px;flex-shrink:0}' +
-'.__pg_filter__ button{background:#3c3c3c;border:1px solid #555;color:#ccc;padding:3px 8px;' +
+'.__pg_filter__ button{background:#3c3c3c;border:1px solid #555;color:#ccc !important;padding:3px 8px;' +
 'border-radius:3px;font-size:11px;font-family:inherit;cursor:pointer}' +
-'.__pg_filter__ button.on{background:#007acc;border-color:#007acc;color:#fff}' +
+'.__pg_filter__ button.on{background:#007acc;border-color:#007acc;color:#fff !important}' +
 '.__pg_filter__ input{flex:1;background:#3c3c3c;border:1px solid #555;color:#d4d4d4;' +
 'padding:3px 8px;border-radius:3px;font-size:11px;font-family:inherit;outline:none}' +
 '#__pg_resize__{height:12px;cursor:ns-resize;display:flex;align-items:center;' +
@@ -1768,6 +1906,10 @@
     var detail = document.createElement('div');
     detail.className = '__pg_net_detail__';
     var dt = 'URL: ' + req.url + '\n';
+    if (req.type === 'resource' || req.type === 'beacon') {
+      dt += 'Type: ' + req.type + (req.initiatorType ? ' (' + req.initiatorType + ')' : '') + '\n';
+      if (req.transferSize !== undefined) dt += 'Transfer: ' + (req.transferSize / 1024).toFixed(1) + ' KB\n';
+    }
     if (req.requestHeaders) dt += '\n--- Request Headers ---\n' + JSON.stringify(req.requestHeaders, null, 2);
     if (req.requestBody) dt += '\n\n--- Request Body ---\n' + req.requestBody;
     if (req.responseHeaders) dt += '\n\n--- Response Headers ---\n' + JSON.stringify(req.responseHeaders, null, 2);
@@ -1829,6 +1971,7 @@
       '<button data-nf="err" class="' + (_netFilter === 'err' ? 'on' : '') + '">Errors' + (errCount ? ' (' + errCount + ')' : '') + '</button>' +
       '<button data-nf="xhr" class="' + (_netFilter === 'xhr' ? 'on' : '') + '">XHR</button>' +
       '<button data-nf="fetch" class="' + (_netFilter === 'fetch' ? 'on' : '') + '">Fetch</button>' +
+      '<button data-nf="resource" class="' + (_netFilter === 'resource' ? 'on' : '') + '">Resource</button>' +
       '<input type="text" placeholder="Search URL..." value="' + _esc(_netSearch) + '" style="flex:1;background:#3c3c3c;border:1px solid #555;color:#d4d4d4;padding:3px 8px;border-radius:3px;font-size:11px;font-family:inherit;outline:none">' +
       '<button data-nf="__clear__">Clear</button>';
     nf.addEventListener('click', function(e) {
@@ -1858,6 +2001,8 @@
         if (req.type !== 'xhr') continue;
       } else if (_netFilter === 'fetch') {
         if (req.type !== 'fetch') continue;
+      } else if (_netFilter === 'resource') {
+        if (req.type !== 'resource' && req.type !== 'beacon') continue;
       }
       if (_netSearch && req.url.toLowerCase().indexOf(_netSearch.toLowerCase()) === -1) continue;
       list.appendChild(_makeNetRow(req));

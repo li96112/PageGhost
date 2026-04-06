@@ -397,11 +397,13 @@ def build_debug_panel(data):
 }}
 #__dbg_toggle__:hover {{ background:#2d2d44; }}
 #__dbg_panel__ {{
-  position:fixed; left:0; top:0; bottom:0; width:320px; z-index:2147483645;
-  background:#1e1e2e; color:#cdd6f4; font-family:-apple-system,system-ui,sans-serif;
-  font-size:12px; border-right:2px solid #89b4fa; box-shadow:4px 0 16px rgba(0,0,0,0.4);
+  all:initial; position:fixed; left:0; top:0; bottom:0; width:320px; z-index:2147483645;
+  background:#1e1e2e !important; color:#cdd6f4 !important; font-family:-apple-system,system-ui,sans-serif;
+  font-size:12px; line-height:1.4; border-right:2px solid #89b4fa; box-shadow:4px 0 16px rgba(0,0,0,0.4);
   display:none; flex-direction:column; overflow:hidden;
 }}
+#__dbg_panel__ *,#__dbg_panel__ *::before,#__dbg_panel__ *::after {{ box-sizing:border-box; font-family:inherit; line-height:inherit; }}
+#__dbg_panel__ div,#__dbg_panel__ span,#__dbg_panel__ p {{ color:inherit; }}
 #__dbg_panel__.open {{ display:flex; }}
 #__dbg_panel__ .hdr {{
   padding:10px 12px; background:#181825; border-bottom:1px solid #313244;
@@ -413,7 +415,7 @@ def build_debug_panel(data):
   display:flex; flex-wrap:wrap; gap:2px; padding:6px 8px; background:#181825; border-bottom:1px solid #313244;
 }}
 #__dbg_panel__ .tab {{
-  padding:4px 8px; border-radius:4px; cursor:pointer; background:#313244; color:#a6adc8;
+  padding:4px 8px; border-radius:4px; cursor:pointer; background:#313244 !important; color:#a6adc8 !important;
   font-size:11px; white-space:nowrap;
 }}
 #__dbg_panel__ .tab:hover {{ background:#45475a; color:#cdd6f4; }}
@@ -424,8 +426,8 @@ def build_debug_panel(data):
 #__dbg_panel__ .tab .badge.err {{ background:#f38ba8; }}
 #__dbg_panel__ .info {{ padding:8px 12px; overflow-y:auto; flex:1; }}
 #__dbg_panel__ .info-row {{ padding:3px 0; border-bottom:1px solid #313244; display:flex; gap:6px; }}
-#__dbg_panel__ .info-label {{ color:#6c7086; min-width:60px; flex-shrink:0; }}
-#__dbg_panel__ .info-val {{ color:#cdd6f4; word-break:break-all; }}
+#__dbg_panel__ .info-label {{ color:#6c7086 !important; min-width:60px; flex-shrink:0; }}
+#__dbg_panel__ .info-val {{ color:#cdd6f4 !important; word-break:break-all; }}
 
 /* 弹窗 */
 #__dbg_modal_overlay__ {{
@@ -434,10 +436,12 @@ def build_debug_panel(data):
 }}
 #__dbg_modal_overlay__.open {{ display:flex; }}
 #__dbg_modal__ {{
-  background:#1e1e2e; border:1px solid #89b4fa; border-radius:8px;
+  all:initial; background:#1e1e2e !important; color:#cdd6f4 !important; border:1px solid #89b4fa; border-radius:8px;
   width:90vw; max-width:1000px; height:80vh; display:flex; flex-direction:column;
-  box-shadow:0 8px 32px rgba(0,0,0,0.5);
+  box-shadow:0 8px 32px rgba(0,0,0,0.5); font-family:-apple-system,system-ui,sans-serif; font-size:12px; line-height:1.4;
 }}
+#__dbg_modal__ *,#__dbg_modal__ *::before,#__dbg_modal__ *::after {{ box-sizing:border-box; font-family:inherit; line-height:inherit; }}
+#__dbg_modal__ div,#__dbg_modal__ span,#__dbg_modal__ p,#__dbg_modal__ td,#__dbg_modal__ th {{ color:inherit; }}
 #__dbg_modal__ .m-hdr {{
   padding:12px 16px; background:#181825; border-bottom:1px solid #313244;
   display:flex; align-items:center; justify-content:space-between;
@@ -463,10 +467,10 @@ def build_debug_panel(data):
 #__dbg_modal__ .m-body {{ flex:1; overflow-y:auto; padding:0; }}
 #__dbg_modal__ .m-body table {{ width:100%; border-collapse:collapse; font-size:12px; }}
 #__dbg_modal__ .m-body th {{
-  position:sticky; top:0; background:#181825; color:#89b4fa; padding:8px 12px;
+  position:sticky; top:0; background:#181825 !important; color:#89b4fa !important; padding:8px 12px;
   text-align:left; border-bottom:1px solid #313244; font-weight:600;
 }}
-#__dbg_modal__ .m-body td {{ padding:6px 12px; border-bottom:1px solid #313244; vertical-align:top; }}
+#__dbg_modal__ .m-body td {{ padding:6px 12px; border-bottom:1px solid #313244; vertical-align:top; color:#cdd6f4 !important; }}
 #__dbg_modal__ .m-body tr:hover {{ background:#313244; cursor:pointer; }}
 .badge-method {{ padding:2px 6px; border-radius:3px; font-size:10px; font-weight:700; color:#fff; }}
 .badge-method.GET {{ background:#3b82f6; }} .badge-method.POST {{ background:#22c55e; }}
@@ -487,10 +491,12 @@ def build_debug_panel(data):
 }}
 #__dbg_detail_overlay__.open {{ display:flex; }}
 #__dbg_detail__ {{
-  background:#1e1e2e; border:1px solid #89b4fa; border-radius:8px;
+  all:initial; background:#1e1e2e !important; color:#cdd6f4 !important; border:1px solid #89b4fa; border-radius:8px;
   width:85vw; max-width:900px; height:75vh; display:flex; flex-direction:column;
-  box-shadow:0 8px 32px rgba(0,0,0,0.5);
+  box-shadow:0 8px 32px rgba(0,0,0,0.5); font-family:-apple-system,system-ui,sans-serif; font-size:12px; line-height:1.4;
 }}
+#__dbg_detail__ *,#__dbg_detail__ *::before,#__dbg_detail__ *::after {{ box-sizing:border-box; font-family:inherit; line-height:inherit; }}
+#__dbg_detail__ div,#__dbg_detail__ span,#__dbg_detail__ p {{ color:inherit; }}
 #__dbg_detail__ .d-hdr {{
   padding:10px 16px; background:#181825; border-bottom:1px solid #313244;
   font-weight:700; color:#89b4fa; font-size:13px; display:flex; align-items:center; justify-content:space-between;
@@ -502,9 +508,9 @@ def build_debug_panel(data):
 .d-section {{ margin-bottom:12px; }}
 .d-section-title {{ color:#89b4fa; font-weight:700; font-size:12px; margin-bottom:4px; border-bottom:1px solid #313244; padding-bottom:4px; }}
 .d-kv {{ display:grid; grid-template-columns:180px 1fr; gap:2px 8px; font-size:11px; }}
-.d-kv .dk {{ color:#6c7086; padding:2px 0; }} .d-kv .dv {{ color:#cdd6f4; padding:2px 0; word-break:break-all; }}
-.d-pre {{ background:#181825; border:1px solid #313244; border-radius:4px; padding:8px; font-size:11px;
-  color:#a6e3a1; white-space:pre-wrap; word-break:break-all; max-height:300px; overflow-y:auto; font-family:monospace; }}
+.d-kv .dk {{ color:#6c7086 !important; padding:2px 0; }} .d-kv .dv {{ color:#cdd6f4 !important; padding:2px 0; word-break:break-all; }}
+.d-pre {{ background:#181825 !important; border:1px solid #313244; border-radius:4px; padding:8px; font-size:11px;
+  color:#a6e3a1 !important; white-space:pre-wrap; word-break:break-all; max-height:300px; overflow-y:auto; font-family:monospace; }}
 .d-copy {{ padding:2px 8px; background:#313244; color:#89b4fa; border:1px solid #45475a;
   border-radius:3px; cursor:pointer; font-size:10px; margin-left:8px; }}
 .d-copy:hover {{ background:#45475a; }}
@@ -1175,15 +1181,15 @@ def serve(snapshot_path, port=8080, assets_dir=None, no_open=False):
     if not no_open:
         webbrowser.open(url)
 
-    # 心跳检测线程：30 秒没收到心跳就关闭服务器
+    # 心跳检测线程：3 分钟没收到心跳就关闭服务器
     import time, threading
     server._last_heartbeat = time.time()
 
     def heartbeat_checker():
         while True:
-            time.sleep(30)
-            if time.time() - server._last_heartbeat > 30:
-                print("\n[*] 30 秒未收到心跳，网页可能已关闭，服务器停止")
+            time.sleep(60)
+            if time.time() - server._last_heartbeat > 180:
+                print("\n[*] 3 分钟未收到心跳，网页可能已关闭，服务器停止")
                 server.shutdown()
                 break
 
