@@ -614,27 +614,81 @@ def build_debug_panel(data):
   }}
 
   // ---- 网络 ----
+  function _netCategory(e) {{
+    // 非 resource 类型直接分类
+    if (e.type === 'fetch' || e.type === 'xhr' || e.type === 'beacon') return 'Fetch/XHR';
+    if (e.type === 'resource-error') {{
+      var eit = (e.initiatorType || '').toLowerCase();
+      if (eit === 'img') return 'Img';
+      if (eit === 'script') return 'JS';
+      if (eit === 'link') return 'CSS';
+      if (eit === 'iframe') return 'Doc';
+      return 'Other';
+    }}
+    // resource 类型：优先按 URL 特征判断（initiatorType 不一定准确）
+    var url = (e.url || '').split('?')[0].toLowerCase();
+    var fullUrl = (e.url || '').toLowerCase();
+    var it = (e.initiatorType || '').toLowerCase();
+    // Font（优先，因为 fonts.googleapis.com 返回的是 CSS 但本质是字体请求）
+    if (/\.(woff2?|ttf|otf|eot)$/.test(url) || /fonts\.(googleapis|gstatic)\.com/.test(fullUrl)) return 'Font';
+    // Img
+    if (it === 'img' || it === 'image' || /\.(png|jpe?g|gif|svg|webp|ico|bmp|avif)$/.test(url)) return 'Img';
+    // JS
+    if (it === 'script' || /\.js$/.test(url)) return 'JS';
+    // CSS
+    if (it === 'link' || it === 'css' || /\.css$/.test(url)) return 'CSS';
+    // Media
+    if (/\.(mp4|webm|m3u8|ts|mp3|ogg|wav|flac|aac)$/.test(url) || it === 'video' || it === 'audio') return 'Media';
+    // Doc
+    if (it === 'document' || it === 'iframe' || /\.html?$/.test(url)) return 'Doc';
+    // Wasm
+    if (/\.wasm$/.test(url)) return 'Wasm';
+    // Manifest
+    if (/manifest\.json$/.test(url) || /\.webmanifest$/.test(url)) return 'Manifest';
+    // WS（websocket 条目如果有的话）
+    // translate 脚本
+    if (/translate/.test(fullUrl) && /\.js/.test(url)) return 'JS';
+    if (/gstatic\.com/.test(fullUrl)) return 'JS';
+    // fallback
+    if (it === 'xmlhttprequest' || it === 'fetch') return 'Fetch/XHR';
+    return 'Other';
+  }}
+
   function showNetwork() {{
-    var filter = '<input type="text" placeholder="搜索 URL..." oninput="__dbgFilterNet__(this.value)">' +
-      ['全部','成功','失败','fetch','xhr'].map(function(f) {{
-        return '<span class="fbtn" data-netfilter="' + f + '">' + f + '</span>';
-      }}).join('');
+    // 统计各分类数量
+    var catOrder = ['All','Fetch/XHR','Doc','CSS','JS','Font','Img','Media','WS','Wasm','Manifest','Other'];
+    var cats = {{}};
+    catOrder.forEach(function(c) {{ cats[c] = 0; }});
+    cats['All'] = network.length;
+    network.forEach(function(e) {{ cats[_netCategory(e)]++; }});
+
+    var filter = '<input type="text" placeholder="Filter" oninput="__dbgFilterNet__(this.value)">';
+    catOrder.forEach(function(f) {{
+      if (f !== 'All' && cats[f] === 0) return;
+      filter += '<span class="fbtn' + (f === 'All' ? ' active' : '') + '" data-netfilter="' + f + '">' + f + '</span>';
+    }});
 
     var rows = network.map(function(e, i) {{
       var m = e.method || 'GET';
       var url = _esc((e.url||'').substring(0, 100));
-      var st = e.error ? '<span style="color:#f38ba8">FAIL</span>' : '<span class="badge-status ' + _statusCls(e.status) + '">' + e.status + '</span>';
-      return '<tr data-idx="' + i + '" onclick="__dbgNetDetail__(' + i + ')">' +
-        '<td>' + (i+1) + '</td>' +
-        '<td><span class="badge-method ' + m + '">' + m + '</span></td>' +
-        '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + _esc(e.url) + '">' + url + '</td>' +
+      var cat = _netCategory(e);
+      var st = e.error ? '<span style="color:#f38ba8">FAIL</span>'
+        : e.statusText === 'in-flight' ? '<span style="color:#fbbf24">pending</span>'
+        : '<span class="badge-status ' + _statusCls(e.status) + '">' + e.status + '</span>';
+      // 从 URL 中提取文件名
+      var fname = (e.url||'').split('?')[0].split('/').pop() || e.url || '';
+      if (fname.length > 40) fname = fname.substring(0, 37) + '...';
+      return '<tr data-idx="' + i + '" data-cat="' + cat + '" onclick="__dbgNetDetail__(' + i + ')">' +
+        '<td style="color:#cdd6f4 !important">' + _esc(fname) + '</td>' +
         '<td>' + st + '</td>' +
-        '<td>' + (e.latency||0) + 'ms</td>' +
-        '<td>' + (e.type||'fetch') + '</td></tr>';
+        '<td><span class="badge-method ' + m + '">' + m + '</span></td>' +
+        '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#89b4fa !important" title="' + _esc(e.url) + '">' + _esc((e.url||'').replace(/https?:\/\/[^/]+/,'')) + '</td>' +
+        '<td style="text-align:right">' + (e.latency||0) + ' ms</td>' +
+        '<td style="text-align:right;color:#a6adc8 !important">' + (e.transferSize ? (e.transferSize/1024).toFixed(1) + ' KB' : '—') + '</td></tr>';
     }}).join('');
 
     openModal('网络录制 (' + network.length + ')', filter,
-      '<table><thead><tr><th>#</th><th>方法</th><th>URL</th><th>状态</th><th>延迟</th><th>类型</th></tr></thead><tbody id="__dbg_net_tbody__">' + rows + '</tbody></table>');
+      '<table><thead><tr><th>Name</th><th>Status</th><th>Method</th><th>Path</th><th style="text-align:right">Time</th><th style="text-align:right">Size</th></tr></thead><tbody id="__dbg_net_tbody__">' + rows + '</tbody></table>');
   }}
 
   window.__dbgFilterNet__ = function(q) {{
@@ -650,13 +704,15 @@ def build_debug_panel(data):
     var el = ev.target.closest('[data-netfilter]');
     if (!el) return;
     var type = el.getAttribute('data-netfilter');
+    // 高亮当前选中的过滤按钮
+    el.parentElement.querySelectorAll('.fbtn').forEach(function(b) {{ b.classList.remove('active'); }});
+    el.classList.add('active');
     document.querySelectorAll('#__dbg_net_tbody__ tr').forEach(function(tr) {{
       var e = network[+tr.dataset.idx] || {{}};
+      var cat = tr.dataset.cat || '';
       var show = true;
-      if (type === '成功') show = !e.error && (+e.status) < 400;
-      else if (type === '失败') show = !!e.error || (+e.status) >= 400;
-      else if (type === 'fetch') show = e.type === 'fetch';
-      else if (type === 'xhr') show = e.type === 'xhr';
+      if (type === 'All') show = true;
+      else show = cat === type;
       tr.style.display = show ? '' : 'none';
     }});
   }});

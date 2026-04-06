@@ -431,8 +431,24 @@
         initiatorType: tag, status: 0, statusText: 'load failed',
         error: tag + ' load error', latency: 0, body: null, ts: Date.now()
       };
-      _pushDevNet(entry);
-      if (isRecording) networkLog.push(entry);
+      // 用 HEAD 请求探测真实状态码（跨域 Resource Timing 拿不到 responseStatus）
+      _fetch(src, { method: 'HEAD', mode: 'cors', credentials: 'omit' }).then(function (r) {
+        entry.status = r.status || 0;
+        entry.statusText = r.status + ' ' + (r.statusText || '');
+      }).catch(function () {
+        // CORS 拒绝 — 再试 no-cors，虽然拿不到状态码，但至少确认请求可达性
+        return _fetch(src, { method: 'HEAD', mode: 'no-cors', credentials: 'omit' }).then(function (r) {
+          // opaque response: type === 'opaque', status === 0
+          if (r.type === 'opaque') {
+            entry.statusText = 'load failed (CORS blocked, status unknown)';
+          }
+        }).catch(function () {
+          entry.statusText = 'load failed (network error)';
+        });
+      }).finally(function () {
+        _pushDevNet(entry);
+        if (isRecording) networkLog.push(entry);
+      });
     }
   }, true); // capture phase，必须用 true 才能捕获资源错误
 
@@ -488,6 +504,7 @@
 
   // --- Resource Timing 采集（img/script/link/video 等 HTML 标签发起的请求）---
   const _capturedFetchXhrUrls = new Set(); // 用于去重，避免和 fetch/XHR 重复
+  const _seenResourceUrls = new Set();    // resource 类型 URL 去重
   const _origPushDevNet = _pushDevNet;
 
   // 包装 _pushDevNet，记录 fetch/xhr 的 URL 用于去重
@@ -500,6 +517,9 @@
     if (!url || url.startsWith('data:') || url.startsWith('blob:') || url.indexOf('__heartbeat__') !== -1) return;
     // 跳过已被 fetch/XHR 捕获的（通过 URL 匹配）
     if (_capturedFetchXhrUrls.has(url)) return;
+    // 同一 URL 只记录一次（去重，避免 Google Translate/Fonts 等轮询请求刷屏）
+    if (_seenResourceUrls.has(url)) return;
+    _seenResourceUrls.add(url);
 
     var resEntry = {
       type: 'resource',
