@@ -1972,7 +1972,32 @@
     }
   }
 
-  var _netFilter = 'all';
+  function _pgNetCat(e) {
+    if (e.type === 'fetch' || e.type === 'xhr' || e.type === 'beacon') return 'Fetch/XHR';
+    if (e.type === 'resource-error') {
+      var eit = (e.initiatorType || '').toLowerCase();
+      if (eit === 'img') return 'Img';
+      if (eit === 'script') return 'JS';
+      if (eit === 'link') return 'CSS';
+      return 'Other';
+    }
+    var url = (e.url || '').split('?')[0].toLowerCase();
+    var full = (e.url || '').toLowerCase();
+    var it = (e.initiatorType || '').toLowerCase();
+    if (/\.(woff2?|ttf|otf|eot)$/.test(url) || /fonts\.(googleapis|gstatic)\.com/.test(full)) return 'Font';
+    if (it === 'img' || it === 'image' || /\.(png|jpe?g|gif|svg|webp|ico|bmp|avif)$/.test(url)) return 'Img';
+    if (it === 'script' || /\.js$/.test(url)) return 'JS';
+    if (it === 'link' || it === 'css' || /\.css$/.test(url)) return 'CSS';
+    if (/\.(mp4|webm|m3u8|ts|mp3|ogg|wav)$/.test(url) || it === 'video' || it === 'audio') return 'Media';
+    if (it === 'document' || it === 'iframe' || /\.html?$/.test(url)) return 'Doc';
+    if (/\.wasm$/.test(url)) return 'Wasm';
+    if (/manifest\.json$/.test(url) || /\.webmanifest$/.test(url)) return 'Manifest';
+    if (/gstatic\.com/.test(full)) return 'JS';
+    if (it === 'xmlhttprequest' || it === 'fetch') return 'Fetch/XHR';
+    return 'Other';
+  }
+
+  var _netFilter = 'All';
   var _netSearch = '';
 
   function _renderNetwork(body) {
@@ -1986,13 +2011,19 @@
       if (log[j].status && (log[j].status < 200 || log[j].status >= 400)) errCount++;
       if (log[j].error) errCount++;
     }
-    nf.innerHTML =
-      '<button data-nf="all" class="' + (_netFilter === 'all' ? 'on' : '') + '">All (' + log.length + ')</button>' +
-      '<button data-nf="err" class="' + (_netFilter === 'err' ? 'on' : '') + '">Errors' + (errCount ? ' (' + errCount + ')' : '') + '</button>' +
-      '<button data-nf="xhr" class="' + (_netFilter === 'xhr' ? 'on' : '') + '">XHR</button>' +
-      '<button data-nf="fetch" class="' + (_netFilter === 'fetch' ? 'on' : '') + '">Fetch</button>' +
-      '<button data-nf="resource" class="' + (_netFilter === 'resource' ? 'on' : '') + '">Resource</button>' +
-      '<input type="text" placeholder="Search URL..." value="' + _esc(_netSearch) + '" style="flex:1;background:#3c3c3c;border:1px solid #555;color:#d4d4d4;padding:3px 8px;border-radius:3px;font-size:11px;font-family:inherit;outline:none">' +
+    // 按 Chrome DevTools 分类统计
+    var _cats = { 'All': log.length, 'Fetch/XHR': 0, 'Doc': 0, 'CSS': 0, 'JS': 0, 'Font': 0, 'Img': 0, 'Media': 0, 'WS': 0, 'Wasm': 0, 'Manifest': 0, 'Other': 0 };
+    for (var ci = 0; ci < log.length; ci++) { _cats[_pgNetCat(log[ci])]++; }
+    var _catKeys = ['All','Fetch/XHR','Doc','CSS','JS','Font','Img','Media','WS','Wasm','Manifest','Other'];
+    var btns = '';
+    for (var ck = 0; ck < _catKeys.length; ck++) {
+      var _ck = _catKeys[ck];
+      if (_ck !== 'All' && _cats[_ck] === 0) continue;
+      btns += '<button data-nf="' + _ck + '" class="' + (_netFilter === _ck ? 'on' : '') + '">' + _ck + '</button>';
+    }
+    btns += '<button data-nf="err" class="' + (_netFilter === 'err' ? 'on' : '') + '" style="color:#f44747 !important">✕' + (errCount || '') + '</button>';
+    nf.innerHTML = btns +
+      '<input type="text" placeholder="Filter" value="' + _esc(_netSearch) + '" style="flex:1;background:#3c3c3c;border:1px solid #555;color:#d4d4d4;padding:3px 8px;border-radius:3px;font-size:11px;font-family:inherit;outline:none">' +
       '<button data-nf="__clear__">Clear</button>';
     nf.addEventListener('click', function(e) {
       var btn = e.target.closest('button');
@@ -2017,12 +2048,8 @@
       var req = log[i];
       if (_netFilter === 'err') {
         if (req.status && req.status >= 200 && req.status < 400 && !req.error) continue;
-      } else if (_netFilter === 'xhr') {
-        if (req.type !== 'xhr') continue;
-      } else if (_netFilter === 'fetch') {
-        if (req.type !== 'fetch') continue;
-      } else if (_netFilter === 'resource') {
-        if (req.type !== 'resource' && req.type !== 'beacon') continue;
+      } else if (_netFilter !== 'All') {
+        if (_pgNetCat(req) !== _netFilter) continue;
       }
       if (_netSearch && req.url.toLowerCase().indexOf(_netSearch.toLowerCase()) === -1) continue;
       list.appendChild(_makeNetRow(req));
