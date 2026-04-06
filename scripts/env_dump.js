@@ -426,29 +426,24 @@
     if (tag === 'img' || tag === 'script' || tag === 'link' || tag === 'video' || tag === 'audio' || tag === 'source' || tag === 'iframe') {
       var src = el.src || el.href || '';
       if (!src || src === 'about:blank') return;
+      // 从 Resource Timing 中查找真实状态码（避免 HEAD 探测产生额外请求噪音）
+      var status = 0;
+      var statusText = 'load failed';
+      try {
+        var perfEntries = performance.getEntriesByName(src, 'resource');
+        if (perfEntries.length > 0) {
+          var last = perfEntries[perfEntries.length - 1];
+          if (last.responseStatus) { status = last.responseStatus; statusText = status + ''; }
+        }
+      } catch (_pe) {}
       var entry = {
         type: 'resource-error', url: src, method: 'GET',
-        initiatorType: tag, status: 0, statusText: 'load failed',
-        error: tag + ' load error', latency: 0, body: null, ts: Date.now()
+        initiatorType: tag, status: status, statusText: statusText,
+        error: tag + ' load error (' + (status || 'blocked/failed') + ')',
+        latency: 0, body: null, ts: Date.now()
       };
-      // 用 HEAD 请求探测真实状态码（跨域 Resource Timing 拿不到 responseStatus）
-      _fetch(src, { method: 'HEAD', mode: 'cors', credentials: 'omit' }).then(function (r) {
-        entry.status = r.status || 0;
-        entry.statusText = r.status + ' ' + (r.statusText || '');
-      }).catch(function () {
-        // CORS 拒绝 — 再试 no-cors，虽然拿不到状态码，但至少确认请求可达性
-        return _fetch(src, { method: 'HEAD', mode: 'no-cors', credentials: 'omit' }).then(function (r) {
-          // opaque response: type === 'opaque', status === 0
-          if (r.type === 'opaque') {
-            entry.statusText = 'load failed (CORS blocked, status unknown)';
-          }
-        }).catch(function () {
-          entry.statusText = 'load failed (network error)';
-        });
-      }).finally(function () {
-        _pushDevNet(entry);
-        if (isRecording) networkLog.push(entry);
-      });
+      _pushDevNet(entry);
+      if (isRecording) networkLog.push(entry);
     }
   }, true); // capture phase，必须用 true 才能捕获资源错误
 
@@ -2018,7 +2013,6 @@
     var btns = '';
     for (var ck = 0; ck < _catKeys.length; ck++) {
       var _ck = _catKeys[ck];
-      if (_ck !== 'All' && _cats[_ck] === 0) continue;
       btns += '<button data-nf="' + _ck + '" class="' + (_netFilter === _ck ? 'on' : '') + '">' + _ck + '</button>';
     }
     btns += '<button data-nf="err" class="' + (_netFilter === 'err' ? 'on' : '') + '" style="color:#f44747 !important">✕' + (errCount || '') + '</button>';

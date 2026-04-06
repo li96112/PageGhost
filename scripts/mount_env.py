@@ -664,7 +664,6 @@ def build_debug_panel(data):
 
     var filter = '<input type="text" placeholder="Filter" oninput="__dbgFilterNet__(this.value)">';
     catOrder.forEach(function(f) {{
-      if (f !== 'All' && cats[f] === 0) return;
       filter += '<span class="fbtn' + (f === 'All' ? ' active' : '') + '" data-netfilter="' + f + '">' + f + '</span>';
     }});
 
